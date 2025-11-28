@@ -154,9 +154,10 @@ device_count_coins(IN unsigned char *device_image,
     unsigned int thread_id = threadIdx.y * blockDim.x + threadIdx.x;
     __shared__ unsigned short SAD_block[SAD_SIZE_X * SAD_SIZE_Y];
     __shared__ int top_offset, right_offset, left_offset, bottom_offset;
+    __shared__ bool skip_block;
 
     // Perfectly centered coin margins:
-    // Top:    3 px
+    // Top:    2 px
     // Bottom: 2 px
     // Left:   0 px
     // Right:  0 px
@@ -167,26 +168,107 @@ device_count_coins(IN unsigned char *device_image,
     int center_of_coin_x = coin_width / 2;
     int center_of_coin_y = coin_height / 2;
 
-    if ( (threadIdx.x == blockDim.x / 2 && threadIdx.y == 0) ) { // Top mid
+    if (threadIdx.x == 0 && threadIdx.y == 0) skip_block = false;
+    __syncthreads(); 
 
-    } else if ((threadIdx.x == blockDim.x - 1 && threadIdx.y == blockDim.y / 2)) { // right mid
 
-    } else if ((threadIdx.x == 0 && threadIdx.y == blockDim.y / 2)) { // left mid
-
-    } else if ((threadIdx.x == blockDim.x / 2 && threadIdx.y == blockDim.y - 1)) { // bottom mid
-        
+    // Check for coin in tile
+    if ((threadIdx.x == 0 && threadIdx.y == 0)) {
+        int image_x = block_corner_x + center_of_coin_x;
+        int image_y = block_corner_y + center_of_coin_y;
+        // If we have two black pixels arranged vertically next to one another there can be no coin there
+        if ((device_image[image_y * image_width + image_x] == 0) && 
+           (device_image[image_y - 1 * image_width + image_x] == 0)) {
+            skip_block = true;
+           } else {
+            skip_block = false;
+           }
     }
-
-
-        // Call scoutFunction()
-        // returns num of offset pixels from top/right/left/bottom
-        // use that offset to calculate SAD area for both main image and coin
-
 
     __syncthreads();
 
-    int sad_x = block_corner_x + (center_of_coin_x - (SAD_SIZE_X / 2));
-    int sad_y = block_corner_y + (center_of_coin_y - (SAD_SIZE_Y / 2));
+    if (skip_block) {
+        return;
+    }
+
+    if ( (threadIdx.x == 2 && threadIdx.y == 0) ) { // Top mid
+
+        // calculate top middle edge pixel of image
+        int top_mid_x = block_corner_x + center_of_coin_x;
+        int top_mid_y = block_corner_y;
+
+        // check if pixel is not black
+        if (device_image[top_mid_y * image_width + top_mid_x] != 0) {
+            return; // if pixel NOT black, return because coin is overlapping here and we can't get a meaningful offset
+        } 
+
+        // we already check the first position, so start indexing from 1
+        // coin_height * 0.20 is about 26
+        for (int i = 1; i < 26; i++) {
+            if (device_image[(top_mid_y + i) * image_width + top_mid_x] != 0) {
+                i > 2 ? top_offset = i - 2 : top_offset = 0; // If it's greater than original margin we know there is extra margin to account for
+                return; // Exit the thread once we have the top_offset
+            }
+        }
+
+    } else if ((threadIdx.x == 3 && threadIdx.y == 0)) { // bottom mid
+
+        int bottom_mid_x = block_corner_x + center_of_coin_x;
+        int bottom_mid_y = block_corner_y + coin_height - 1;
+
+        if (device_image[bottom_mid_y * image_width + bottom_mid_x] != 0) {
+            return;
+        } 
+
+        for (int i = 1; i < 26; i++) {
+            if (device_image[(bottom_mid_y - i) * image_width + bottom_mid_x] != 0) {
+                i > 2 ? bottom_offset = i + 2 : bottom_offset = 0;
+                return;
+            }
+        }
+
+    } else if ((threadIdx.x == 4 && threadIdx.y == 0)) { // left
+        int left_mid_x = block_corner_x;
+        int left_mid_y = block_corner_y + center_of_coin_y;
+
+        if (device_image[left_mid_y * image_width + left_mid_x] != 0) {
+            return;
+        } 
+
+        for (int i = 1; i < 26; i++) {
+            if (device_image[left_mid_y * image_width + (left_mid_x + i)] != 0) {
+                left_offset = i;
+                return;
+            }
+        }
+
+    } else if ((threadIdx.x == 5 && threadIdx.y == 0)) { // right
+
+        int right_mid_x = block_corner_x + coin_width - 1;
+        int right_mid_y = block_corner_y + center_of_coin_y;
+
+        if (device_image[right_mid_y * image_width + right_mid_x] != 0) {
+            return;
+        } 
+
+        for (int i = 1; i < 26; i++) {
+            if (device_image[right_mid_y * image_width + (right_mid_x - i)] != 0) {
+                right_offset = i;
+                return;
+            }
+        }
+    }
+
+    __syncthreads();
+
+    x_margin = left_offset >= right_offset ? left_offset : right_offset
+    y_margin = top_offset >= bottom_offset ? top_offset : bottom_offset
+
+    bool x_pos = left_offset >= right_offset ? true : false
+    bool y_pos = top_offset >= bottom_offset ? true : false
+
+    int sad_x = block_corner_x 
+    int sad_y = block_corner_y 
 
     int image_x = threadIdx.x + sad_x;
     int image_y = threadIdx.y + sad_y;
