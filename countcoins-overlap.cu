@@ -9,8 +9,8 @@
 // Helper functions and utilities to work with CUDA
 
 // Dimensions of a rectangular block of threads.  CUDA blocks will be launched with THREAD_GRID_XxTHREAD_GRID_Y threads
-#define THREAD_GRID_X 16
-#define THREAD_GRID_Y 16
+#define THREAD_GRID_X 32
+#define THREAD_GRID_Y 32
 
 // Dimensions of a rectangular block of pixels to calculate the SAD values.
 #define SAD_SIZE_X (THREAD_GRID_X)
@@ -18,7 +18,7 @@
 
 // Enable the bounding box image feature for debugging purposes.
 // Will make your program slower
-// #define BOUNDS_IMAGE
+#define BOUNDS_IMAGE
 
 // Output data in CSV format
 // #define CSV
@@ -107,9 +107,9 @@ CudaCheckError(__FILE__, __LINE__);
 
 __device__ void draw_bounding_box_device(unsigned char *image, int width, int height, int x, int y, int width_box, int height_box, unsigned char grey_val)
 {
-    for (int i = y; i < (y + height_box); i += 4)
+    for (int i = y; i < (y + height_box); i += 1)
     {
-        for (int j = x; j < (x + width_box); j += 4)
+        for (int j = x; j < (x + width_box); j += 1)
         {
             if (i >= 0 && i < height && j >= 0 && j < width)
             {
@@ -118,6 +118,7 @@ __device__ void draw_bounding_box_device(unsigned char *image, int width, int he
         }
     }
 }
+
 
 // Function to save a PGM image to a file
 void save_pgm_image(const char *filename, unsigned char *image, int width, int height)
@@ -152,6 +153,13 @@ device_count_coins(IN unsigned char *device_image,
     unsigned int block_id = blockIdx.y * gridDim.x + blockIdx.x;
     unsigned int thread_id = threadIdx.y * blockDim.x + threadIdx.x;
     __shared__ unsigned short SAD_block[SAD_SIZE_X * SAD_SIZE_Y];
+    __shared__ int top_offset, right_offset, left_offset, bottom_offset;
+
+    // Perfectly centered coin margins:
+    // Top:    3 px
+    // Bottom: 2 px
+    // Left:   0 px
+    // Right:  0 px
 
     int block_corner_x = blockIdx.x * coin_width;
     int block_corner_y = blockIdx.y * coin_height;
@@ -159,17 +167,32 @@ device_count_coins(IN unsigned char *device_image,
     int center_of_coin_x = coin_width / 2;
     int center_of_coin_y = coin_height / 2;
 
-    int sad_corner_img_x = block_corner_x + (center_of_coin_x - (SAD_SIZE_X / 2));
-    int sad_corner_img_y = block_corner_y + (center_of_coin_y - (SAD_SIZE_X / 2));
+    if ( (threadIdx.x == blockDim.x / 2 && threadIdx.y == 0) ) { // Top mid
 
-    int image_x = threadIdx.x + sad_corner_img_x;
-    int image_y = threadIdx.y + sad_corner_img_y;
+    } else if ((threadIdx.x == blockDim.x - 1 && threadIdx.y == blockDim.y / 2)) { // right mid
 
-    int sad_corner_coin_x = center_of_coin_x - (SAD_SIZE_X / 2);
-    int sad_corner_coin_y = center_of_coin_y - (SAD_SIZE_X / 2);
+    } else if ((threadIdx.x == 0 && threadIdx.y == blockDim.y / 2)) { // left mid
 
-    int coin_x = threadIdx.x + sad_corner_coin_x;
-    int coin_y = threadIdx.y + sad_corner_coin_y;
+    } else if ((threadIdx.x == blockDim.x / 2 && threadIdx.y == blockDim.y - 1)) { // bottom mid
+        
+    }
+
+
+        // Call scoutFunction()
+        // returns num of offset pixels from top/right/left/bottom
+        // use that offset to calculate SAD area for both main image and coin
+
+
+    __syncthreads();
+
+    int sad_x = block_corner_x + (center_of_coin_x - (SAD_SIZE_X / 2));
+    int sad_y = block_corner_y + (center_of_coin_y - (SAD_SIZE_Y / 2));
+
+    int image_x = threadIdx.x + sad_x;
+    int image_y = threadIdx.y + sad_y;
+
+    int coin_x = threadIdx.x + sad_x;
+    int coin_y = threadIdx.y + sad_y;
 
     unsigned int difference = abs(device_image[image_y * image_width + image_x] - device_coin[coin_y * coin_width + coin_x]);
 
@@ -178,7 +201,8 @@ device_count_coins(IN unsigned char *device_image,
     __syncthreads();
 
 #if defined BOUNDS_IMAGE
-    draw_bounding_box_device(device_bounds_image, image_width, image_height, sad_corner_img_x, sad_corner_img_y, SAD_SIZE_X, SAD_SIZE_Y, 255);
+    draw_bounding_box_device(device_bounds_image, image_width, image_height, sad_x, sad_y, SAD_SIZE_X, SAD_SIZE_Y, 255);
+    // draw_bounding_box_device(unsigned char *image, int width, int height, int x, int y, int width_box, int height_box, unsigned char grey_val)
 #endif
 
     // Sum up SAD_block array
@@ -376,7 +400,7 @@ allocate_device_buffers(image_height, image_width, coin_height, coin_width);
 
         time_start = omp_get_wtime();
 
-
+    // Idea: create an array that holds head count and tail count for the one pass algo
     head_count = count_coins_gpu(image, coin_head, bounding_box_image, image_height, image_width, coin_height, coin_width);
     tail_count = count_coins_gpu(image, coin_tail, bounding_box_image, image_height, image_width, coin_height, coin_width);
 
