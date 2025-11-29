@@ -9,8 +9,8 @@
 // Helper functions and utilities to work with CUDA
 
 // Dimensions of a rectangular block of threads.  CUDA blocks will be launched with THREAD_GRID_XxTHREAD_GRID_Y threads
-#define THREAD_GRID_X 16
-#define THREAD_GRID_Y 16
+#define THREAD_GRID_X 32
+#define THREAD_GRID_Y 32
 
 // Dimensions of a rectangular block of pixels to calculate the SAD values.
 #define SAD_SIZE_X (THREAD_GRID_X)
@@ -18,7 +18,7 @@
 
 // Enable the bounding box image feature for debugging purposes.
 // Will make your program slower
-#define BOUNDS_IMAGE
+// #define BOUNDS_IMAGE
 
 // Output data in CSV format
 // #define CSV
@@ -35,11 +35,11 @@
 
 // GPU implementation buffers
 // Device buffers
-unsigned char *device_image, *device_bounds_image, *device_coin;
-unsigned int *device_count_per_block;
+unsigned char *device_image, *device_bounds_image, *device_heads, *device_tails;
+unsigned int *device_heads_per_block, *device_tails_per_block;
 
 // Host buffers
-unsigned int *count_per_block;
+unsigned int *heads_per_block, *tails_per_block;
 
 void CudaCheckError(const char *file, unsigned int line)
 {
@@ -142,25 +142,24 @@ void save_pgm_image(const char *filename, unsigned char *image, int width, int h
 
 __global__ void
 device_count_coins(IN unsigned char *device_image,
-                   IN unsigned char *device_coin,
+                   IN unsigned char *device_heads,
+                   IN unsigned char *device_tails,
                    OUT unsigned char *device_bounds_image,
                    IN unsigned int image_height,
                    IN unsigned int image_width,
                    IN unsigned int coin_height,
                    IN unsigned int coin_width,
-                   OUT unsigned int *device_count_per_block)
+                   OUT unsigned int *device_heads_per_block,
+                   OUT unsigned int *device_tails_per_block)
 {
     unsigned int block_id = blockIdx.y * gridDim.x + blockIdx.x;
     unsigned int thread_id = threadIdx.y * blockDim.x + threadIdx.x;
-    __shared__ unsigned short SAD_block[SAD_SIZE_X * SAD_SIZE_Y];
-    __shared__ int top_offset, bottom_offset, left_offset, right_offset;
+    __shared__ unsigned short SAD_heads_block[SAD_SIZE_X * SAD_SIZE_Y];
+    __shared__ unsigned short SAD_tails_block[SAD_SIZE_X * SAD_SIZE_Y];
+    __shared__ unsigned int best_heads_sad;
+    __shared__ unsigned int best_tails_sad;
     __shared__ bool skip_block;
 
-    // Perfectly centered coin margins:
-    // Top:    2 px
-    // Bottom: 2 px
-    // Left:   0 px
-    // Right:  0 px
 
     int block_corner_x = blockIdx.x * coin_width;
     int block_corner_y = blockIdx.y * coin_height;
@@ -175,13 +174,11 @@ device_count_coins(IN unsigned char *device_image,
 
     // Check for coin in tile
     if ((threadIdx.x == 0 && threadIdx.y == 0)) {
-        top_offset = 0;
-        bottom_offset = 0;
-        left_offset = 0;
-        right_offset = 0;
         int image_x = block_corner_x + center_of_coin_x;
         int image_y = block_corner_y + center_of_coin_y;
-        // If we have two black pixels arranged vertically next to one another there can be no coin there
+        best_heads_sad = 0xFFFFFFFF;
+        best_tails_sad = 0xFFFFFFFF;
+        // If we have two black pixels arranged vertically next to one another in the middle there can be no coin there
         if ((device_image[image_y * image_width + image_x] == 0) && 
            (device_image[(image_y - 1) * image_width + image_x] == 0)) {
             skip_block = true;
@@ -195,136 +192,88 @@ device_count_coins(IN unsigned char *device_image,
     if (skip_block) {
         return;
     }
-    __syncthreads();
 
-    if ( (threadIdx.x == 1 && threadIdx.y == 0) ) { // Top mid
+    // int block_corner_x = blockIdx.x * coin_width;
+    // int block_corner_y = blockIdx.y * coin_height;
 
-        // calculate top middle edge pixel of image
-        int top_mid_x = block_corner_x + center_of_coin_x;
-        int top_mid_y = block_corner_y;
+    // int center_of_coin_x = coin_width / 2;
+    // int center_of_coin_y = coin_height / 2;
 
-        // check if pixel is not black
-        if (device_image[top_mid_y * image_width + top_mid_x] != 0) {
-            top_offset = 0; // if pixel NOT black, return because coin is overlapping here and we can't get a meaningful offset
-        } else {
-            // we already check the first position, so start indexing from 1
-            // coin_height * 0.20 is about 26
-            for (int i = 1; i < coin_height; i++) {
-                if (device_image[(top_mid_y + i) * image_width + top_mid_x] != 0) {
-                    i > 2 ? top_offset = i - 2 : top_offset = 0; // If it's greater than original margin we know there is extra margin to account for
-                    break; // Exit the thread once we have the top_offset
+    int sad_corner_img_x = block_corner_x + (center_of_coin_x - (SAD_SIZE_X / 2));
+    int sad_corner_img_y = block_corner_y + (center_of_coin_y - (SAD_SIZE_Y / 2));
+
+    int sad_corner_coin_x = center_of_coin_x - (SAD_SIZE_X / 2);
+    int sad_corner_coin_y = center_of_coin_y - (SAD_SIZE_Y / 2);
+
+    int range_x = (int)(coin_width * 0.21);
+    int range_y = (int)(coin_height * 0.21);
+
+    unsigned int heads_difference;
+    unsigned int tails_difference;
+
+    for (int dx = -range_x; dx <= range_x; dx++) {
+        for (int dy = -range_y; dy <= range_y; dy++) {
+            int image_x = threadIdx.x + sad_corner_img_x + dx;
+            int image_y = threadIdx.y + sad_corner_img_y + dy;
+            int coin_x = threadIdx.x + sad_corner_coin_x;
+            int coin_y = threadIdx.y + sad_corner_coin_y;
+
+            heads_difference = abs(device_image[image_y * image_width + image_x] - device_heads[coin_y * coin_width + coin_x]);
+            tails_difference = abs(device_image[image_y * image_width + image_x] - device_tails[coin_y * coin_width + coin_x]);
+
+            SAD_heads_block[thread_id] = heads_difference;
+            SAD_tails_block[thread_id] = tails_difference;
+
+            __syncthreads();
+
+            // Sum up SAD_heads_block array
+            for (unsigned int s = 1; s < SAD_SIZE_X * SAD_SIZE_Y; s *= 2)
+            {
+                int index = 2 * s * thread_id;
+
+                if (index < SAD_SIZE_X * SAD_SIZE_Y)
+                {
+                    SAD_heads_block[index] += SAD_heads_block[index + s];
+                    SAD_tails_block[index] += SAD_tails_block[index + s];
                 }
+                __syncthreads();
+            }
+
+
+            if (thread_id == 0)
+            {
+                // Test if a coin is detected at this location
+                if (SAD_heads_block[0] < best_heads_sad)
+                {
+                    best_heads_sad = SAD_heads_block[0];
+                }
+                if (SAD_tails_block[0] < best_tails_sad)
+                {
+                     best_tails_sad = SAD_tails_block[0];
+                }
+            }
+            __syncthreads();
         }
     }
-
-
-
-    } else if ((threadIdx.x == 2 && threadIdx.y == 0)) { // bottom mid
-
-        int bottom_mid_x = block_corner_x + center_of_coin_x;
-        int bottom_mid_y = block_corner_y + coin_height - 1;
-
-        if (device_image[bottom_mid_y * image_width + bottom_mid_x] != 0) {
-            bottom_offset = 0;
-        } else {
-            for (int i = 1; i < coin_height; i++) {
-                if (device_image[(bottom_mid_y - i) * image_width + bottom_mid_x] != 0) {
-                    i > 2 ? bottom_offset = i - 2 : bottom_offset = 0;
-                    break;
-                }
-            }
-        }
-
-
-    } else if ((threadIdx.x == 3 && threadIdx.y == 0)) { // left
-        int left_mid_x = block_corner_x;
-        int left_mid_y = block_corner_y + center_of_coin_y;
-
-        if (device_image[left_mid_y * image_width + left_mid_x] != 0) {
-            left_offset = 0;
-        } else {
-            for (int i = 1; i < coin_width; i++) {
-                if (device_image[left_mid_y * image_width + (left_mid_x + i)] != 0) {
-                    left_offset = i;
-                    break;
-                }
-            }
-        }
-
-    } else if ((threadIdx.x == 4 && threadIdx.y == 0)) { // right
-
-        int right_mid_x = block_corner_x + coin_width - 1;
-        int right_mid_y = block_corner_y + center_of_coin_y;
-
-        if (device_image[right_mid_y * image_width + right_mid_x] != 0) {
-            right_offset = 0;
-        } else {
-            for (int i = 1; i < coin_width; i++) {
-                if (device_image[right_mid_y * image_width + (right_mid_x - i)] != 0) {
-                    right_offset = i;
-                    break;
-                }
-            }
-        }
-
-    }
-
-    __syncthreads();
- 
-    // int x_shift = (left_offset - right_offset) / 2;
-    // int y_shift = (top_offset - bottom_offset) / 2;
-
-    int actual_coin_center_x = block_corner_x + left_offset + ((coin_width - left_offset - right_offset) / 2);
-    int actual_coin_center_y = block_corner_y + top_offset + ((coin_height - top_offset - bottom_offset) / 2);
-
-    // int sad_x = block_corner_x + center_of_coin_x - (SAD_SIZE_X/2) + x_shift;
-    // int sad_y = block_corner_y + center_of_coin_y - (SAD_SIZE_Y/2) + y_shift;   
-
-    int sad_x = actual_coin_center_x - (SAD_SIZE_X/2);
-    int sad_y = actual_coin_center_y - (SAD_SIZE_Y/2);
-
-    int image_x = threadIdx.x + sad_x;
-    int image_y = threadIdx.y + sad_y;
-
-    int coin_x = center_of_coin_x - (SAD_SIZE_X/2) + threadIdx.x;
-    int coin_y = center_of_coin_y - (SAD_SIZE_Y/2) + threadIdx.y;
-
-    unsigned int difference = abs(device_image[image_y * image_width + image_x] - device_coin[coin_y * coin_width + coin_x]);
-
-    SAD_block[thread_id] = difference;
-
-    __syncthreads();
 
 #if defined BOUNDS_IMAGE
-    draw_bounding_box_device(device_bounds_image, image_width, image_height, sad_x, sad_y, SAD_SIZE_X, SAD_SIZE_Y, 255);
-    // draw_bounding_box_device(unsigned char *image, int width, int height, int x, int y, int width_box, int height_box, unsigned char grey_val)
+    draw_bounding_box_device(device_bounds_image, image_width, image_height, sad_corner_img_x, sad_corner_img_y, SAD_SIZE_X * 2, SAD_SIZE_Y * 2 , 255);
 #endif
 
-    // Sum up SAD_block array
-    for (unsigned int s = 1; s < SAD_SIZE_X * SAD_SIZE_Y; s *= 2)
-    {
-        int index = 2 * s * thread_id;
-
-        if (index < SAD_SIZE_X * SAD_SIZE_Y)
+    if (thread_id == 0) {
+        if (best_heads_sad < best_tails_sad)
         {
-            SAD_block[index] += SAD_block[index + s];
-        }
-        __syncthreads();
-    }
-
-    if (thread_id == 0)
-    {
-        // Test if a coin is detected at this location
-        if (SAD_block[0] < CORRELATION_THRESHOLD)
-        {
-            device_count_per_block[block_id] = 1;
+            device_heads_per_block[block_id] = 1;
+            device_tails_per_block[block_id] = 0;
         }
         else
         {
-            device_count_per_block[block_id] = 0;
+            device_tails_per_block[block_id] = 1;
+            device_heads_per_block[block_id] = 0;
         }
     }
 }
+
 
 // Buffer allocation is 'expensive' in time.  Do this once before we start timing for performance
 void allocate_device_buffers(unsigned int image_height,
@@ -338,7 +287,8 @@ void allocate_device_buffers(unsigned int image_height,
     size_t size_count = num_blocks * sizeof(unsigned int);
 
     // allocate one counter slot per CUDA block
-    cudaMalloc(&device_count_per_block, (image_height / coin_height) * (image_width / coin_width) * sizeof(unsigned int));
+    cudaMalloc(&device_heads_per_block, (image_height / coin_height) * (image_width / coin_width) * sizeof(unsigned int));
+    cudaMalloc(&device_tails_per_block, (image_height / coin_height) * (image_width / coin_width) * sizeof(unsigned int));
 
     // allocate image buffers
     cudaMalloc(&device_image, image_height * image_width);
@@ -346,13 +296,20 @@ void allocate_device_buffers(unsigned int image_height,
 #if defined BOUNDS_IMAGE
     cudaMalloc(&device_bounds_image, image_height * image_width);
 #endif
-    cudaMalloc(&device_coin, coin_height * coin_width);
+    cudaMalloc(&device_heads, coin_height * coin_width);
+    cudaMalloc(&device_tails, coin_height * coin_width);
     CudaCheckError(__FILE__, __LINE__);
-    count_per_block = (unsigned int *)malloc(size_count);
+    heads_per_block = (unsigned int *)malloc(size_count);
+    tails_per_block = (unsigned int *)malloc(size_count);
 
-    if (count_per_block == NULL)
+    if (heads_per_block == NULL)
     {
-        fprintf(stderr, "count_per_block malloc failed\n");
+        fprintf(stderr, "heads_per_block malloc failed\n");
+        exit(1);
+    }
+    if (tails_per_block == NULL)
+    {
+        fprintf(stderr, "tails_per_block malloc failed\n");
         exit(1);
     }
 }
@@ -364,18 +321,24 @@ void free_device_buffers()
 #if defined BOUNDS_IMAGE
     cudaFree(device_bounds_image);
 #endif
-    cudaFree(device_coin);
-    cudaFree(device_count_per_block);
+    cudaFree(device_heads);
+    cudaFree(device_tails);
+    cudaFree(device_heads_per_block);
+    cudaFree(device_tails_per_block);
     CudaCheckError(__FILE__, __LINE__);
 }
 
 int count_coins_gpu(unsigned char *image,
-                    unsigned char *coin,
+                    unsigned char *heads,
+                    unsigned char *tails,
                     unsigned char *bounds_image,
                     unsigned int image_height,
                     unsigned int image_width,
                     unsigned int coin_height,
-                    unsigned int coin_width)
+                    unsigned int coin_width,
+                    int *head_count,
+                    int *tail_count
+                )
 {
     unsigned int x_blocks = image_width / coin_width;
     unsigned int y_blocks = image_height / coin_height;
@@ -395,7 +358,8 @@ int count_coins_gpu(unsigned char *image,
 #if defined BOUNDS_IMAGE
     cudaMemcpy(device_bounds_image, bounds_image, image_height * image_width, cudaMemcpyHostToDevice);
 #endif
-    cudaMemcpy(device_coin, coin, coin_height * coin_width, cudaMemcpyHostToDevice);
+    cudaMemcpy(device_heads, heads, coin_height * coin_width, cudaMemcpyHostToDevice);
+    cudaMemcpy(device_tails, tails, coin_height * coin_width, cudaMemcpyHostToDevice);
 
     CudaCheckError(__FILE__, __LINE__);
 
@@ -410,32 +374,40 @@ int count_coins_gpu(unsigned char *image,
     // execute the kernel:
     device_count_coins<<<numBlocks, threadsPerBlock>>>(
         device_image,
-        device_coin,
+        device_heads,
+        device_tails,
         device_bounds_image,
         image_height,
         image_width,
         coin_height,
         coin_width,
-        device_count_per_block);
+        device_heads_per_block,
+        device_tails_per_block);
 
     cudaDeviceSynchronize();
     CudaCheckError(__FILE__, __LINE__);
 
     // copy result from the device to the host:
-    cudaMemcpy(count_per_block, device_count_per_block, size_count, cudaMemcpyDeviceToHost);
+    cudaMemcpy(heads_per_block, device_heads_per_block, size_count, cudaMemcpyDeviceToHost);
+    cudaMemcpy(tails_per_block, device_tails_per_block, size_count, cudaMemcpyDeviceToHost);
 #if defined BOUNDS_IMAGE
     cudaMemcpy(bounds_image, device_bounds_image, image_height * image_width, cudaMemcpyDeviceToHost);
 #endif
     CudaCheckError(__FILE__, __LINE__);
 
     // compute the sum :
-    int numCoins = 0;
+    int numHeads = 0;
+    int numTails = 0;
     for (int i = 0; i < num_blocks; i++)
     {
-        numCoins += count_per_block[i];
+        numHeads += heads_per_block[i];
+        numTails += tails_per_block[i];
     }
 
-    return numCoins;
+    *head_count = numHeads;
+    *tail_count = numTails;
+
+    return 0;
 }
 
 int main(int argc, char *argv[])
@@ -495,9 +467,7 @@ allocate_device_buffers(image_height, image_width, coin_height, coin_width);
 
         time_start = omp_get_wtime();
 
-    // Idea: create an array that holds head count and tail count for the one pass algo
-    head_count = count_coins_gpu(image, coin_head, bounding_box_image, image_height, image_width, coin_height, coin_width);
-    tail_count = count_coins_gpu(image, coin_tail, bounding_box_image, image_height, image_width, coin_height, coin_width);
+    count_coins_gpu(image, coin_head, coin_tail, bounding_box_image, image_height, image_width, coin_height, coin_width, &head_count, &tail_count);
 
 
     time_end = omp_get_wtime();
@@ -530,6 +500,7 @@ cudaFreeHost(image);
 cudaFreeHost(coin_head);
 cudaFreeHost(coin_tail);
 free(bounding_box_image);
-free(count_per_block);
+free(heads_per_block);
+free(tails_per_block);
 return 0;
 }
