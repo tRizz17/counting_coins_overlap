@@ -159,8 +159,6 @@ device_count_coins(IN unsigned char *device_image,
     __shared__ unsigned int best_heads_sad;
     __shared__ unsigned int best_tails_sad;
     __shared__ bool skip_block;
-    __shared__ bool early_exit;
-
 
     int block_corner_x = blockIdx.x * coin_width;
     int block_corner_y = blockIdx.y * coin_height;
@@ -171,7 +169,6 @@ device_count_coins(IN unsigned char *device_image,
 
     if (threadIdx.x == 0 && threadIdx.y == 0) {
         skip_block = false;
-        early_exit = false;
     } 
     __syncthreads(); 
 
