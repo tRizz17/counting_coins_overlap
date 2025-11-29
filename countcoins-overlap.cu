@@ -9,8 +9,8 @@
 // Helper functions and utilities to work with CUDA
 
 // Dimensions of a rectangular block of threads.  CUDA blocks will be launched with THREAD_GRID_XxTHREAD_GRID_Y threads
-#define THREAD_GRID_X 32
-#define THREAD_GRID_Y 32
+#define THREAD_GRID_X 2
+#define THREAD_GRID_Y 2
 
 // Dimensions of a rectangular block of pixels to calculate the SAD values.
 #define SAD_SIZE_X (THREAD_GRID_X)
@@ -159,6 +159,7 @@ device_count_coins(IN unsigned char *device_image,
     __shared__ unsigned int best_heads_sad;
     __shared__ unsigned int best_tails_sad;
     __shared__ bool skip_block;
+    __shared__ bool early_exit;
 
 
     int block_corner_x = blockIdx.x * coin_width;
@@ -168,7 +169,10 @@ device_count_coins(IN unsigned char *device_image,
     int center_of_coin_y = coin_height / 2;
 
 
-    if (threadIdx.x == 0 && threadIdx.y == 0) skip_block = false;
+    if (threadIdx.x == 0 && threadIdx.y == 0) {
+        skip_block = false;
+        early_exit = false;
+    } 
     __syncthreads(); 
 
 
