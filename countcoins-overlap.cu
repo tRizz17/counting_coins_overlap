@@ -21,7 +21,7 @@
 // #define BOUNDS_IMAGE
 
 // Output data in CSV format
-// #define CSV
+#define CSV
 
 // Number of times to run to measure peak performance
 #define NUMTRIES 20
@@ -227,7 +227,7 @@ device_count_coins(IN unsigned char *device_image,
 
             __syncthreads();
 
-            // Sum up SAD_heads_block array
+            // Sum up SAD_heads_block and SAD_tails_block arrays
             for (unsigned int s = 1; s < SAD_SIZE_X * SAD_SIZE_Y; s *= 2)
             {
                 int index = 2 * s * thread_id;
@@ -243,7 +243,7 @@ device_count_coins(IN unsigned char *device_image,
 
             if (thread_id == 0)
             {
-                // Test if a coin is detected at this location
+                // check if sad value is less than previous minimum
                 if (SAD_heads_block[0] < best_heads_sad)
                 {
                     best_heads_sad = SAD_heads_block[0];
@@ -287,7 +287,7 @@ void allocate_device_buffers(unsigned int image_height,
     unsigned int num_blocks = x_blocks * y_blocks;
     size_t size_count = num_blocks * sizeof(unsigned int);
 
-    // allocate one counter slot per CUDA block
+    // allocate two counter slots per CUDA block
     cudaMalloc(&device_heads_per_block, (image_height / coin_height) * (image_width / coin_width) * sizeof(unsigned int));
     cudaMalloc(&device_tails_per_block, (image_height / coin_height) * (image_width / coin_width) * sizeof(unsigned int));
 
